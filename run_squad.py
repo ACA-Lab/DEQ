@@ -921,6 +921,7 @@ def main():
 
     # Evaluation
     if training_args.do_eval:
+        os.environ["squad_evaluating"] = "true" # env var to mark evaluation in progress
         logger.info("*** Evaluate ***")
         if args.eval_checkpoint is not None:
             logger.info(f"Loading checkpoint from {args.eval_checkpoint}")
@@ -933,6 +934,7 @@ def main():
 
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
+        del os.environ["squad_evaluating"] # env var to mark the end of evaluation
 
     # Prediction
     if training_args.do_predict:

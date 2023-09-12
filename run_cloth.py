@@ -14,6 +14,23 @@ from torch.utils.tensorboard import SummaryWriter
 
 from transformers import AutoConfig, AutoTokenizer, AutoModelForMaskedLM
 
+# ===============================
+# | Set up logger
+# ===============================
+import logging
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+fh = logging.FileHandler('log_cloth.txt')
+fh.setLevel(logging.INFO)
+fh.setFormatter(formatter)
+logger.addHandler(fh)
+
+sh = logging.StreamHandler()
+sh.setLevel(logging.INFO)
+sh.setFormatter(formatter)
+logger.addHandler(sh)
+# ===============================
 
 """ CLOTH Dataset """
 
@@ -120,9 +137,8 @@ def load_data_list(split=None, folder=DATASET_ROOT):
                 name = os.path.join(root, name)
                 with open(name) as f:
                     tmp = json.load(f)
-                    lst.append(tmp)
-                    if not tmp["options"]:
-                        raise
+                    if tmp["options"]:
+                        lst.append(tmp)
     print(folder, split, len(lst))
     return lst
 
@@ -361,6 +377,7 @@ def train(args):
 
             writer.add_scalar("eval_acc", correct / total, epoch + 1)
         print("epoch %d acc: %f" % (epoch + 1, correct / total))
+        logger.info("epoch %d acc: %f", epoch + 1, correct / total)
         
         torch.save(
             {
@@ -373,6 +390,7 @@ def train(args):
 
 
 def valid(args):
+    os.environ["cloth_evaluating"] = "true" # env var to mark evaluation in progress
     model, tokenizer = load_model_and_tokenizer(args)
     val_loader = load_cloth_dataset(args, tokenizer, mode="eval")
 
@@ -408,6 +426,8 @@ def valid(args):
             total += prediction.shape[0]
 
     print(f"eval acc: {correct / total:.3f}")
+    logger.info(f"eval acc: {correct / total:.3f}")
+    del os.environ["cloth_evaluating"]
 
 
 def main():

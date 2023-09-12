@@ -542,6 +542,7 @@ def main():
 
     # Evaluation
     if training_args.do_eval:
+        os.environ["glue_evaluating"] = "true" # env var to mark evaluation in progress
         logger.info("*** Evaluate ***")
 
         if args.eval_checkpoint is not None:
@@ -566,6 +567,7 @@ def main():
 
             trainer.log_metrics("eval", metrics)
             trainer.save_metrics("eval", metrics)
+        del os.environ["glue_evaluating"] # delete env var to mark end of evaluation
 
     if training_args.do_predict:
         logger.info("*** Predict ***")

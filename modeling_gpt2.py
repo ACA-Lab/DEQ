@@ -55,6 +55,47 @@ from transformers.models.gpt2.configuration_gpt2 import GPT2Config
 from modeling_sanger_spattn import gen_sparsity_mask, quant_qk_matmul, prune_attn_scores
 from quant_utils import build_quant_matmul
 
+from modeling_refine import refine_attn_scores, _eval_attn_mask, _eval_refinement
+
+
+import time
+import envvar_utils
+from pathlib import Path
+
+def init_ops_count_csv(num_heads=12):
+    if envvar_utils.log_ops_count_enabled() and envvar_utils.is_in_eval():
+        global csv_files
+        csv_files = []
+        
+        cur_time = time.strftime("%Y-%m-%d-%H_%M_%S", time.localtime(time.time()))
+        if os.environ.get('model_config_name') is not None:
+            csv_dir = Path.cwd() / 'ops_count' / os.environ['model_config_name']
+        else:
+            csv_dir = Path.cwd() / 'ops_count' / cur_time
+        csv_dir.mkdir(parents=True, exist_ok=True)
+
+        if os.environ.get('TASK_NAME') is not None:
+            all_csv_filename = f"{cur_time}_bert_{os.environ['TASK_NAME']}.csv"
+            csv_filename = f"{cur_time}_bert_{os.environ['TASK_NAME']}_head{{i}}.csv"
+        else:
+            all_csv_filename = f"{cur_time}_bert.csv"
+            csv_filename = f"{cur_time}_bert_head{{i}}.csv"
+        
+        if True:    # also produce an all-head csv
+            all_csv_path = csv_dir / all_csv_filename
+            assert not all_csv_path.exists(), f"{all_csv_path} already exists."
+            all_csv_file = all_csv_path.open('w')
+            all_csv_file.write('head_size, head_idx, padded_seq_len, num_non_pad_pos, num_mask_non_zeros, num_mask_empty_rows, mask_type\n')
+            csv_files.append(all_csv_file)
+
+        for i in range(num_heads):
+            csv_path = csv_dir / csv_filename.format(i=i)
+            assert not csv_path.exists(), f"{csv_path} already exists."
+            csv_file = csv_path.open('w')
+            csv_file.write('head_size, padded_seq_len, num_non_pad_pos, num_mask_non_zeros, num_mask_empty_rows, mask_type\n')
+            csv_files.append(csv_file)
+
+
 
 logger = logging.get_logger(__name__)
 
@@ -190,6 +231,7 @@ class GPT2Attention(nn.Module):
     def _attn(self, query, key, value, attention_mask=None, head_mask=None):
         do_quant = getattr(self.config, 'quant_qk', False)
         do_prune = getattr(self.config, 'prune_score', False)
+        do_refine = getattr(self.config, 'refine_score', False)
 
         attn_weights = torch.matmul(query, key.transpose(-1, -2))
         if self.scale_attn_weights:
@@ -255,9 +297,94 @@ class GPT2Attention(nn.Module):
             sparsity_mask = prune_attn_scores(attn_scores, attention_mask, self.config)
             attn_weights += sparsity_mask
 
-        # if attention_mask is not None:
+                        # some assertions
+            assert sparsity_mask.shape == attn_scores.shape, f"sparsity_mask({sparsity_mask.shape}) should have same shape as attn_scores({attn_scores.shape})"
+            batch_size, num_attention_heads, seq_len, attention_head_size = query.shape
+            assert (batch_size, num_attention_heads, seq_len, attention_head_size) == value.shape, f"value({value.shape}) should have shape (batch_size, num_attention_heads, attention_head_size, seq_len)"
+            # end of assertions
+
+            # log for statistics
+            if envvar_utils.log_ops_count_enabled() and envvar_utils.is_in_eval():
+                attn_mask_0_or_1 = (attention_mask > -1).float()
+                sparsity_mask_0_or_1 = (sparsity_mask > -1).float()
+                attn_mask_0_or_1 = attn_mask_0_or_1 * attn_mask_0_or_1.permute(0, 1, 3, 2)
+                assert attn_mask_0_or_1.shape == (batch_size, 1, seq_len, seq_len), f"attn_mask_0_or_1({attn_mask_0_or_1.shape}) should have same shape as b, 1, seq, seq({(batch_size, 1, seq_len, seq_len)})"
+                attn_mask_0_or_1 = attn_mask_0_or_1.broadcast_to(sparsity_mask.shape)
+                sparsity_mask_non_padding = attn_mask_0_or_1 * sparsity_mask_0_or_1
+                for head_idx in range(num_attention_heads):
+                    try:
+                        csv_files
+                    except NameError:
+                        init_ops_count_csv(num_heads=num_attention_heads)
+                    for batch_idx in range(batch_size):
+                        logs = [
+                            attention_head_size, # head_size
+                            seq_len, # padded_seq_len
+                            (attn_mask_0_or_1[batch_idx][head_idx] > 0).sum().item(), # num_non_pad_tokens
+                            (sparsity_mask_non_padding[batch_idx][head_idx] > 0).sum().item(), # num_mask_non_zeros
+                            (sparsity_mask_non_padding[batch_idx][head_idx].sum(dim=-1) < 1).sum().item(), # num_mask_empty_rows
+                            os.environ['model_config_name'] if os.environ.get('model_config_name') is not None \
+                                else 'sanger', # mask_type
+                        ]
+                        csv_files[head_idx + 1].write(','.join([f'{stat}' for stat in logs]) + '\n')
+
+                        logs.insert(1, head_idx)
+                        csv_files[0].write(','.join([f'{stat}' for stat in logs]) + '\n')
+
+
+        if do_refine:
+            import torch.cuda.amp as amp
+            if not do_quant:
+                raise ValueError("do_refine requires do_quant")
+            refinement_mask = refine_attn_scores(quant_attn_weights, attention_mask, self.config)
+            
+            #logger.debug("refinement_mask.shape=%s, ratio=%s", 
+            #             refinement_mask.shape,
+            #              _eval_refinement(refinement_mask, quant_attention_scores))
+            #logger.debug("attention_scores.shape=%s, ratio=%s", attention_scores.shape, _eval_attn_mask(attention_mask))
+            #logger.debug("before refinement: quant_attention_scores.dtype=%s", quant_attention_scores.dtype)
+            #logger.debug("before refinement: refinement_mask.dtype=%s", refinement_mask.dtype)
+            
+            attn_weights[refinement_mask == 0] = quant_attn_weights[refinement_mask == 0] # mask out padding positions
+            #logger.debug("after refinement: attention_scores.dtype=%s", attention_scores.dtype)
+
+            # some assertions
+            assert refinement_mask.shape == quant_attn_weights.shape, f"refinement_mask({refinement_mask.shape}) should have same shape as quant_attn_weights({quant_attn_weights.shape})"
+            batch_size, num_attention_heads, seq_len, attention_head_size = query.shape
+            assert (batch_size, num_attention_heads, seq_len, attention_head_size) == value.shape, f"value({value.shape}) should have shape (batch_size, num_attention_heads, attention_head_size, seq_len)"
+            # end of assertions
+
+            # log for statistics
+            if envvar_utils.log_ops_count_enabled() and envvar_utils.is_in_eval():
+                attn_mask_0_or_1 = (attention_mask > -1).float()
+                attn_mask_0_or_1 = attn_mask_0_or_1 * attn_mask_0_or_1.permute(0, 1, 3, 2)
+                assert attn_mask_0_or_1.shape == (batch_size, 1, seq_len, seq_len), f"attn_mask_0_or_1({attn_mask_0_or_1.shape}) should have same shape as b, 1, seq, seq({(batch_size, 1, seq_len, seq_len)})"
+                attn_mask_0_or_1 = attn_mask_0_or_1.broadcast_to(refinement_mask.shape)
+                refinement_mask_non_padding = attn_mask_0_or_1 * refinement_mask
+                for head_idx in range(num_attention_heads):
+                    try:
+                        csv_files
+                    except NameError:
+                        init_ops_count_csv(num_heads=num_attention_heads)
+                    for batch_idx in range(batch_size):
+                        logs = [
+                            attention_head_size, # head_size
+                            seq_len, # padded_seq_len
+                            (attn_mask_0_or_1[batch_idx][head_idx] > 0).sum().item(), # num_non_pad_tokens
+                            (refinement_mask_non_padding[batch_idx][head_idx] > 0).sum().item(), # num_mask_non_zeros
+                            (refinement_mask_non_padding[batch_idx][head_idx].sum(dim=-1) < 1).sum().item(), # num_mask_empty_rows
+                            os.environ['model_config_name'] if os.environ.get('model_config_name') is not None \
+                                else 'refine', # mask_type
+                        ]
+                        csv_files[head_idx + 1].write(','.join([f'{stat}' for stat in logs]) + '\n')
+
+                        logs.insert(1, head_idx)
+                        csv_files[0].write(','.join([f'{stat}' for stat in logs]) + '\n')
+            
+
+        if attention_mask is not None:  # uncommented for BertViz
         # Apply the attention mask
-        attn_weights = attn_weights + attention_mask
+            attn_weights = attn_weights + attention_mask
 
         attn_weights = nn.Softmax(dim=-1)(attn_weights)
         attn_weights = self.attn_dropout(attn_weights)
@@ -332,7 +459,18 @@ class GPT2Attention(nn.Module):
 
         outputs = (attn_output, present)
         if output_attentions:
-            outputs += (attn_weights,)
+            '''
+            TODO:check
+            added for bertviz
+            '''
+            attention_probs = attn_output
+            attn_data = {
+                'attn': attention_probs,
+                'queries': query,
+                'keys': key.transpose(-1, -2)
+            }
+            outputs += (attn_data, )
+            #outputs += (attn_weights,)
 
         return outputs  # a, present, (attentions)
 

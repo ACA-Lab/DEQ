@@ -1,0 +1,7 @@
+{
+  "class": "BSLongformerSparsityConfig",
+  "block": 2, 
+  "num_sliding_window_blocks": 2, 
+  "global_block_indices": [0], 
+  "global_block_end_indices": null
+}

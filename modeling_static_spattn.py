@@ -12,6 +12,33 @@ import torch
 MAX_SEQ_LENGTH = 512
 
 
+### facilities for calculating sparsity ratio
+'''
+attn_mask中生效的位置，即非padding位置，占总位置的比例
+'''
+def _eval_attn_mask(attn_mask):
+    # attn_mask: bool, [batch_size, 1, seq_len, seq_len]
+
+    # attn_mask is used to mask out padding tokens, is prior to refienment_mask
+    return attn_mask.mean().item()
+
+
+def _eval_overall_sparsity(sparsity_mask, attn_mask):
+    # sparsity_mask: bool, [batch_size, num_heads, seq_len, seq_len]
+    # attn_mask: bool, [batch_size, 1, seq_len, seq_len]
+    scaling_factor = attn_mask.mean(dim=(1, 2, 3))
+    sparsity_per_seq = (sparsity_mask * attn_mask).mean(dim=(1, 2, 3))
+    overall_sparsity = (sparsity_per_seq / scaling_factor).mean().item()
+    return overall_sparsity
+
+
+def _eval_sparsity(sparsity_mask):
+    # sparsity_mask: bool, [batch_size, num_heads, seq_len, seq_len]
+    # attn_mask: bool, [batch_size, 1, seq_len, seq_len]
+    overall_sparsity = sparsity_mask.float().mean().item()
+    return overall_sparsity
+
+
 def setup_layout(num_heads, max_position, block):
     if max_position % block != 0:
         raise ValueError(
@@ -436,6 +463,52 @@ def apply_static_sparsity_mask(sparsity_mask, attention_scores):
     attention_scores += sparsity_mask[:, :tgt_len, :src_len]
 
 
+def get_sparsity_ratio(num_heads=12,max_position=512):
+    configs = ['longformer.json', 'bigbird.json', 'fixed.json']
+    for config in configs:
+        mask = build_static_sparsity_mask(config, 
+                                          num_heads=num_heads,
+                                          max_position=max_position)
+        
+        print(f"Config:{config}\tShape: {mask.shape}")
+
+        # 定义缩小后的张量的大小
+        d_mask_shape = (mask.shape[1] // 16, mask.shape[2] // 16)
+
+        # 初始化缩小后的张量
+        d_mask = torch.zeros(d_mask_shape)
+
+        # 缩小张量
+        for i in range(d_mask_shape[0]):
+            for j in range(d_mask_shape[1]):
+                d_mask[i, j] = mask[0, 16*i, 16*j]
+
+        print(f"Dilated: Config:{config}\tShape: {d_mask.shape}")
+        import matplotlib.pyplot as plt
+        from PIL import Image
+        ## 将掩码张量转换为PIL图像对象
+        ##mask_image = Image.fromarray(mask[0].numpy())
+        ## 将PIL图像对象转换为Matplotlib图像对象
+        ##fig, ax = plt.subplots()
+        #plt.imshow(mask[0], cmap="Wistia")
+        #plt.grid(which='both', color='r', linewidth=1)
+        ## 隐藏坐标轴
+        #plt.axis("off")
+        ## 保存图像
+
+        plt.figure(figsize=(6, 6))
+        plt.pcolormesh(d_mask, edgecolors='white', cmap="cividis", vmin=0, vmax=1, linewidth=0.5)
+        ax = plt.gca()
+        ax.invert_yaxis()
+        
+        ax.set_aspect('equal')
+        plt.axis("off")
+        plt.savefig(config+"_mask_image.png", bbox_inches="tight", pad_inches=0, dpi=300)
+
+        sparsity = _eval_sparsity(mask)
+        print(f"Config:{config}\tSparsity: {sparsity:.6f}")
+
+
 if __name__ == "__main__":
     # attn_mask = build_static_sparsity_mask('big_bird_sparsity_config.json', max_position=8)
     # print(attn_mask.shape)
@@ -453,4 +526,6 @@ if __name__ == "__main__":
     # attn_mask = build_static_sparsity_mask('block_structured_random_sparsity_config.json', max_position=16)
     # print(attn_mask.shape)
     # print(attn_mask[0])
+    
+    get_sparsity_ratio()
     pass

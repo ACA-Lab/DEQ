@@ -1,0 +1,8 @@
+/outputs
+/scripts
+/runs
+/wandb
+/__pycache__
+/data/cloth/
+/ratios
+/ops_count/*/
