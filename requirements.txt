@@ -6,3 +6,4 @@ tqdm
 pandas
 tensorboard
 scikit-learn
+cupy
