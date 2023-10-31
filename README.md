@@ -30,7 +30,7 @@ This repository implements the proposed framework in the paper DEQ: Dynamic Elem
 
     1.  Train a model. 
 
-        We provide scripts for training in the `scripts/` sub-directory. For example, to train a DEQ-pruned BERT-Base model on GLUE for MRPC, you can execute `scripts/train_sparse_on_glue.sh mrpc bert-base adamax_nb80`. Note that you have to pass in an appropriate configuration file, which you can find in `configs/`. You can skip this step if you choose to load a fine-tuned checkpoint directly.
+        We provide scripts for training in the `scripts/` sub-directory. For example, to train a DEQ-pruned BERT-Base model on GLUE for MRPC, you can execute `scripts/train_sparse_on_glue.sh mrpc bert-base-uncased adamax_nb80`. Note that you have to pass in an appropriate configuration file, which you can find in `configs/`. You can skip this step if you choose to load a fine-tuned checkpoint directly.
 
     2.  Evaluate the fine-tuned model. 
 
